@@ -9,6 +9,12 @@ interface MapLocationPickerProps {
   onLocationSelect: (location: string, coordinates: [number, number]) => void;
 }
 
+declare global {
+  interface Window {
+    google: any;
+  }
+}
+
 const MapLocationPicker: React.FC<MapLocationPickerProps> = ({ onLocationSelect }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedLocation, setSelectedLocation] = useState<string>('');
@@ -16,99 +22,128 @@ const MapLocationPicker: React.FC<MapLocationPickerProps> = ({ onLocationSelect 
   const [showApiInput, setShowApiInput] = useState(true);
   const mapRef = useRef<HTMLDivElement>(null);
   const [map, setMap] = useState<any>(null);
+  const [marker, setMarker] = useState<any>(null);
+  const [geocoder, setGeocoder] = useState<any>(null);
+  const [placesService, setPlacesService] = useState<any>(null);
 
   const handleApiKeySubmit = () => {
     if (apiKey.trim()) {
       setShowApiInput(false);
-      initializeMap();
+      loadGoogleMapsScript();
     }
   };
 
-  const initializeMap = async () => {
-    try {
-      // Dynamically import mapbox-gl
-      const mapboxgl = await import('mapbox-gl');
-      
-      if (!mapRef.current) return;
+  const loadGoogleMapsScript = () => {
+    if (window.google) {
+      initializeMap();
+      return;
+    }
 
-      mapboxgl.default.accessToken = apiKey;
-      
-      const mapInstance = new mapboxgl.default.Map({
-        container: mapRef.current,
-        style: 'mapbox://styles/mapbox/streets-v12',
-        center: [-99.1332, 19.4326], // Mexico City
-        zoom: 10
-      });
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
+    script.async = true;
+    script.defer = true;
+    script.onload = initializeMap;
+    
+    document.head.appendChild(script);
+  };
 
-      // Add click handler
-      mapInstance.on('click', async (e) => {
-        const { lng, lat } = e.lngLat;
-        
-        try {
-          // Reverse geocoding to get address
-          const response = await fetch(
-            `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?access_token=${apiKey}`
-          );
-          const data = await response.json();
-          
-          if (data.features && data.features.length > 0) {
-            const place = data.features[0];
-            const locationName = place.place_name;
+  const initializeMap = () => {
+    if (!mapRef.current || !window.google) return;
+
+    const mapInstance = new window.google.maps.Map(mapRef.current, {
+      center: { lat: 19.4326, lng: -99.1332 }, // Mexico City
+      zoom: 10,
+      mapTypeId: window.google.maps.MapTypeId.ROADMAP,
+    });
+
+    const geocoderInstance = new window.google.maps.Geocoder();
+    const placesServiceInstance = new window.google.maps.places.PlacesService(mapInstance);
+
+    setMap(mapInstance);
+    setGeocoder(geocoderInstance);
+    setPlacesService(placesServiceInstance);
+
+    // Add click handler
+    mapInstance.addListener('click', (event: any) => {
+      const lat = event.latLng.lat();
+      const lng = event.latLng.lng();
+      
+      // Reverse geocoding to get address
+      geocoderInstance.geocode(
+        { location: { lat, lng } },
+        (results: any[], status: string) => {
+          if (status === 'OK' && results[0]) {
+            const locationName = results[0].formatted_address;
             setSelectedLocation(locationName);
             onLocationSelect(locationName, [lat, lng]);
-            
-            // Add marker
-            new mapboxgl.default.Marker()
-              .setLngLat([lng, lat])
-              .addTo(mapInstance);
+            updateMarker(lat, lng, locationName);
+          } else {
+            const locationName = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+            setSelectedLocation(locationName);
+            onLocationSelect(locationName, [lat, lng]);
+            updateMarker(lat, lng, locationName);
           }
-        } catch (error) {
-          console.error('Error getting location name:', error);
-          const locationName = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-          setSelectedLocation(locationName);
-          onLocationSelect(locationName, [lat, lng]);
         }
-      });
-
-      setMap(mapInstance);
-    } catch (error) {
-      console.error('Error initializing map:', error);
-    }
+      );
+    });
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim() || !apiKey) return;
+  const updateMarker = (lat: number, lng: number, title: string) => {
+    if (marker) {
+      marker.setMap(null);
+    }
 
-    try {
-      const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(searchQuery)}.json?access_token=${apiKey}&limit=1`
-      );
-      const data = await response.json();
+    const newMarker = new window.google.maps.Marker({
+      position: { lat, lng },
+      map: map,
+      title: title,
+      draggable: true,
+    });
+
+    // Add drag listener to marker
+    newMarker.addListener('dragend', (event: any) => {
+      const newLat = event.latLng.lat();
+      const newLng = event.latLng.lng();
       
-      if (data.features && data.features.length > 0) {
-        const feature = data.features[0];
-        const [lng, lat] = feature.center;
-        const locationName = feature.place_name;
-        
-        setSelectedLocation(locationName);
-        onLocationSelect(locationName, [lat, lng]);
-        
-        if (map) {
-          map.flyTo({ center: [lng, lat], zoom: 14 });
+      geocoder.geocode(
+        { location: { lat: newLat, lng: newLng } },
+        (results: any[], status: string) => {
+          if (status === 'OK' && results[0]) {
+            const locationName = results[0].formatted_address;
+            setSelectedLocation(locationName);
+            onLocationSelect(locationName, [newLat, newLng]);
+          }
+        }
+      );
+    });
+
+    setMarker(newMarker);
+  };
+
+  const handleSearch = () => {
+    if (!searchQuery.trim() || !geocoder) return;
+
+    geocoder.geocode(
+      { address: searchQuery },
+      (results: any[], status: string) => {
+        if (status === 'OK' && results[0]) {
+          const location = results[0].geometry.location;
+          const lat = location.lat();
+          const lng = location.lng();
+          const locationName = results[0].formatted_address;
           
-          // Clear existing markers and add new one
-          const markers = document.querySelectorAll('.mapboxgl-marker');
-          markers.forEach(marker => marker.remove());
+          setSelectedLocation(locationName);
+          onLocationSelect(locationName, [lat, lng]);
           
-          const mapboxgl = await import('mapbox-gl');
-          new mapboxgl.default.Marker()
-            .setLngLat([lng, lat])
-            .addTo(map);
+          map.setCenter({ lat, lng });
+          map.setZoom(14);
+          updateMarker(lat, lng, locationName);
+        } else {
+          console.error('Geocoding failed:', status);
         }
       }
-    } catch (error) {
-      console.error('Error searching location:', error);
-    }
+    );
   };
 
   return (
@@ -124,15 +159,15 @@ const MapLocationPicker: React.FC<MapLocationPickerProps> = ({ onLocationSelect 
           <div className="space-y-4">
             <div>
               <p className="text-sm text-muted-foreground mb-2">
-                Para usar el mapa, necesitas una clave API de Mapbox. Puedes obtenerla gratis en{' '}
-                <a href="https://mapbox.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                  mapbox.com
+                Para usar el mapa, necesitas una clave API de Google Maps. Puedes obtenerla en{' '}
+                <a href="https://console.cloud.google.com/apis/library/maps-backend.googleapis.com" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                  Google Cloud Console
                 </a>
               </p>
               <div className="flex gap-2">
                 <Input
                   type="password"
-                  placeholder="Ingresa tu Mapbox API Key"
+                  placeholder="Ingresa tu Google Maps API Key"
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                 />
@@ -170,7 +205,7 @@ const MapLocationPicker: React.FC<MapLocationPickerProps> = ({ onLocationSelect 
             )}
             
             <p className="text-xs text-muted-foreground">
-              Haz clic en el mapa para seleccionar una ubicación o busca una dirección específica.
+              Haz clic en el mapa para seleccionar una ubicación, busca una dirección específica, o arrastra el marcador para ajustar la posición.
             </p>
           </div>
         )}
